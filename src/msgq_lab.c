@@ -59,16 +59,25 @@ int task_struct_exchange(void) {
 
     mq_unlink(Q_EXCHANGE);
 
-    mq_open(Q_EXCHANGE, O_CREAT|O_RDWR, 0660, &attr);
+    mqd_t mqd = mq_open(Q_EXCHANGE, O_CREAT|O_RDWR, 0660, &attr);
 
     if (mqd == (mqd_t)-1) {
         perror("mq_open");
         return 1;
     }
 
+    //fflush(stdout);
     pid_t pid = fork();
 
-    if (pid == 0){
+    if (pid < 0) {
+        perror("fork");
+        mq_close(mqd);
+        mq_unlink(Q_EXCHANGE);
+        return 1;
+    }
+
+
+    if (pid == 0) {
         char buffer [MSG_BUF_SIZE];
         unsigned int priority;
 
@@ -78,12 +87,49 @@ int task_struct_exchange(void) {
             _exit(1);
         }
 
+        struct SensorReading *received = (struct SensorReading *)buffer;
         
+
+        printf("child received: sensor id=%d value=%d\n", received->sensor_id, received->value);
+        fflush(stdout);
+
+        mq_close(mqd);
+        _exit(0);
     }
 
-    (void)Q_EXCHANGE;
+    struct SensorReading r = {
+            .sensor_id = 7,
+            .value = 42
+    };    
+
+    if (mq_send(mqd, (const char *) &r, sizeof(r), 0) == -1) {
+        perror("mq_send");
+        mq_close(mqd);
+        mq_unlink(Q_EXCHANGE);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
+
+    mq_close(mqd);
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        perror("waitpid");
+        return 1;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return 1;
+    }
+
+    printf("parent: sent reading\n");
+    fflush(stdout);
+    return 0;
+
+    /*(void)Q_EXCHANGE;
     fprintf(stderr, "TODO: task_struct_exchange not implemented\n");
     return 1;
+    */
 }
 
 /*
@@ -114,9 +160,109 @@ int task_struct_exchange(void) {
  */
 int task_priority_order(void) {
     /* TODO: implement task B */
-    (void)Q_PRIO;
+    mq_unlink(Q_PRIO);
+    struct mq_attr attr = {0};
+    attr.mq_maxmsg = 4;
+    attr.mq_msgsize = MSG_BUF_SIZE;
+
+    mqd_t mqd = mq_open(Q_PRIO, O_CREAT | O_RDWR, 0660, &attr);
+
+    if (mqd == (mqd_t)-1) {
+        perror("mq_open");
+        return 1;
+    }
+
+    struct SensorReading low = {
+        .sensor_id = 1,
+        .value = 10
+    };
+
+    if (mq_send(mqd, (const char *)&low, sizeof(low), 1) == -1) {
+        perror("mq_send low priority");
+        mq_close(mqd);
+        mq_unlink(Q_PRIO);
+        return 1;
+    }
+
+    struct SensorReading high = {
+        .sensor_id = 2,
+        .value = 99
+    };
+
+    if (mq_send(mqd, (const char *)&high, sizeof(high), 5) == -1) {
+        perror("mq_send high");
+        mq_close(mqd);
+        mq_unlink(Q_PRIO);
+        return 1;
+    }
+
+    if (mq_close(mqd) == -1) {
+        perror("mq_close");
+        mq_unlink(Q_PRIO);
+        return 1;
+    }
+
+    pid_t pid = fork();
+
+    if (pid == -1) {
+        perror("fork");
+        mq_unlink(Q_PRIO);
+        return 1;
+    }
+
+    if (pid == 0) {
+        mqd_t reader = mq_open(Q_PRIO, O_RDONLY);
+
+        if (reader == (mqd_t)-1) {
+            perror("mq_open child");
+            _exit(1);
+        }
+
+        char buffer[MSG_BUF_SIZE];
+        unsigned int prio;
+
+        if (mq_receive(reader, buffer, sizeof(buffer), &prio) == -1) {
+                perror("mq_receive high");
+                mq_close(reader);
+                _exit(1);
+        }
+
+        struct SensorReading *received = (struct SensorReading *)buffer;
+
+        printf("child received hi-pri: value=%d\n", received->value);
+        fflush(stdout);
+
+        if (mq_receive(reader, buffer, sizeof(buffer), &prio) == -1) {
+                perror("mq_receive low");
+                mq_close(reader);
+                _exit(1);
+        }
+
+        received = (struct SensorReading *)buffer;
+
+        printf("child received lo-pri: value=%d\n", received->value);
+        fflush(stdout);
+
+        mq_close(reader);
+        mq_unlink(Q_PRIO);
+        _exit(0);
+    }
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        perror("waitpid");
+        return 1;
+    }
+
+    if (!WIFEXITED (status) || WEXITSTATUS (status) != 0) {
+        return 1;
+    }
+
+    return 0;
+    /*(void)Q_PRIO;
     fprintf(stderr, "TODO: task_priority_order not implemented\n");
     return 1;
+    */
 }
 
 /*
@@ -138,9 +284,52 @@ int task_priority_order(void) {
  */
 int task_full_queue(void) {
     /* TODO: implement task C */
+    mq_unlink(Q_FULL);
+    struct mq_attr attr = {0};
+    attr.mq_maxmsg = 2;
+    attr.mq_msgsize = MSG_BUF_SIZE;
+
+    mqd_t mqd = mq_open(Q_FULL, O_CREAT|O_WRONLY|O_NONBLOCK, 0660, &attr);
+
+    struct SensorReading r = {
+        .sensor_id = 1,
+        .value = 10
+    };
+
+    for (int i = 0; i < 2; i++) {
+        if (mq_send(mqd, (const char *)&r, sizeof(r), 0) == -1) {
+            perror("mq_send");
+            mq_close(mqd);
+            mq_unlink(Q_FULL);
+            return 1;
+        }
+    }
+
+    if (mq_send(mqd, (const char *)&r, sizeof(r), 0) == -1) {
+        if (errno == EAGAIN) {
+            printf("queue full: EAGAIN detected\n");
+        } else {
+            perror("mq_send third message");
+            mq_close(mqd);
+            mq_unlink(Q_FULL);
+            return 1;
+        }
+    } else {
+        fprintf(stderr, "Expected queue to be full\n");
+        mq_close(mqd);
+        mq_unlink(Q_FULL);
+        return 1;
+    }
+
+    mq_close(mqd);
+    mq_unlink(Q_FULL);
+
+    return 0;
+    /*
     (void)Q_FULL;
     fprintf(stderr, "TODO: task_full_queue not implemented\n");
     return 1;
+    */
 }
 
 /*
@@ -160,9 +349,46 @@ int task_full_queue(void) {
  */
 int task_size_limit(void) {
     /* TODO: implement task D */
-    (void)Q_SIZE;
+    mq_unlink(Q_SIZE);
+    struct mq_attr attr = {0};
+    attr.mq_maxmsg = 4;
+    attr.mq_msgsize = sizeof(struct SensorReading);
+    
+    mqd_t mqd = mq_open(Q_SIZE, O_CREAT|O_WRONLY, 0660, &attr);
+
+    if (mqd == (mqd_t)-1) {
+        perror("mq_open");
+        mq_unlink(Q_SIZE);
+        return 1;
+    }
+
+    char buffer[sizeof(struct SensorReading) + 1] = {'\0'};
+
+    if (mq_send(mqd, buffer, sizeof(buffer), 0) == -1) {
+        if (errno == EMSGSIZE) {
+            printf("oversized send: EMSGSIZE detected\n");
+        } else {
+            perror("mq_send");
+            mq_close(mqd);
+            mq_unlink(Q_SIZE);
+            return 1;
+        }
+    } else {
+        fprintf(stderr, "Expected EMSGSIZE for oversized message\n");
+        mq_close(mqd);
+        mq_unlink(Q_SIZE);
+        return 1;
+    }
+
+    mq_close(mqd);
+    mq_unlink(Q_SIZE);
+
+    return 0;
+
+    /*(void)Q_SIZE;
     fprintf(stderr, "TODO: task_size_limit not implemented\n");
     return 1;
+    */
 }
 
 /* ------------------------------------------------------------------ */
