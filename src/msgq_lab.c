@@ -52,6 +52,35 @@
  */
 int task_struct_exchange(void) {
     /* TODO: implement task A */
+    struct mq_attr attr = {0};
+        attr.mq_maxmsg = 4;
+        attr.mq_msgsize = MSG_BUF_SIZE;
+
+
+    mq_unlink(Q_EXCHANGE);
+
+    mq_open(Q_EXCHANGE, O_CREAT|O_RDWR, 0660, &attr);
+
+    if (mqd == (mqd_t)-1) {
+        perror("mq_open");
+        return 1;
+    }
+
+    pid_t pid = fork();
+
+    if (pid == 0){
+        char buffer [MSG_BUF_SIZE];
+        unsigned int priority;
+
+        if(mq_receive (mqd, buffer, sizeof(buffer), &priority) == -1) {
+            perror("mq_receive");
+            mq_close(mqd);
+            _exit(1);
+        }
+
+        
+    }
+
     (void)Q_EXCHANGE;
     fprintf(stderr, "TODO: task_struct_exchange not implemented\n");
     return 1;
